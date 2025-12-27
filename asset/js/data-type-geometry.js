@@ -39,15 +39,16 @@
                 // TODO Check all x and y, that should be below 180 and 90.
             }
         } else if (datatype === 'geometry') {
-            if (val.includes('MULTIPOINT') || val.includes('MULTILINE') || val.includes('MULTIPOLYGON')) {
-                message = Omeka.jsTranslate('"multipoint", "multiline" and "multipolygon" are not supported for now. Use collection instead.');
-            } else {
+//	I need MULTIs! TODO: figure aout why MULTIs are unsupported
+//            if (val.includes('MULTIPOINT') || val.includes('MULTILINE') || val.includes('MULTIPOLYGON')) {
+//                message = Omeka.jsTranslate('"multipoint", "multiline" and "multipolygon" are not supported for now. Use collection instead.');
+//            } else {
                 try {
                     primitive = Terraformer.WKT.parse(val);
                 } catch (err) {
                     message = invalidMessage(element);
                 }
-            }
+//           }
         } else {
             return false;
         }
@@ -243,6 +244,15 @@
             checkGeometry(this, 'geometry');
         });
 
+        // Added Alt-g short-cut to open geometry editor
+        // TODO: maybe add icon in field to open the geometry editor
+		$('textarea.value.geometry').keydown(function(e) {
+			if(e.altKey && e.keyCode == 71) {
+				const geometry_field=this;
+				openMapEditor(geometry_field.value.trim(), this);
+			}
+		});
+		
         // Search form.
 
         $(document).on('click', 'input[name="geo[mode]"]', function(e) {
@@ -266,9 +276,9 @@
             checkGeometry(this, $(this).hasClass('query-geo-area') ? 'geography' : 'geometry');
         });
 
-    $(document).on('o:sidebar-content-loaded', '#query-sidebar-edit', function(e) {
-        geometryOrGeographyFieldset($(this).find('input[name="geo[mode]"]:checked'));
-    });
+		$(document).on('o:sidebar-content-loaded', '#query-sidebar-edit', function(e) {
+			geometryOrGeographyFieldset($(this).find('input[name="geo[mode]"]:checked'));
+		});
 
         geometryOrGeographyFieldset();
 
@@ -330,3 +340,168 @@
     });
 
 })(jQuery);
+
+
+let mapEditorDialog = null;
+let leafletEditorMap = null;
+let scriptsLoaded = false;
+
+async function openMapEditor(currentWKT, elementWKT) {
+    const PRECISION = 7;
+
+    if (!mapEditorDialog) {
+        mapEditorDialog = document.createElement('dialog');
+        mapEditorDialog.id = 'geometry-editor-dialog';
+        Object.assign(mapEditorDialog.style, {
+            width: '90vw', height: '90vh', padding: '0', border: 'none',
+            borderRadius: '8px', boxShadow: '0 4px 20px rgba(0,0,0,0.5)', overflow: 'hidden'
+        });
+
+		// TODO: move all CSS to data-tyoe-geometry.css
+        mapEditorDialog.innerHTML = `
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@latest/dist/leaflet.css"/>
+            <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.css"/>
+            <div style="display: flex; flex-direction: column; height: 100%;">
+                <div style="padding: 8px 8px 0 8px; background: #404e61; color: white; display: flex; justify-content: space-between; align-items: center;">
+                    <strong style="font-size:1.2em">Geometry Editor</strong>
+                    <div>
+                        <button tile="Esc to close without save" id="close-map-btn" style="padding: 4px 12px; cursor:pointer; background-color: #e3e3e3;">Close</button>
+                        <button title="Ctrl+Enter to save and close" id="save-and-close-map-btn" style="padding: 4px 12px; cursor:pointer; background-color: #e3e3e3;">Save & Close</button>
+                    </div>
+                </div>
+                <div id="map-container" style="flex-grow: 1; width: 100%;"></div>
+                <textarea id="asWKT" style="display:none"></textarea>
+            </div>`;
+        document.body.appendChild(mapEditorDialog);
+
+        // Implementation of #6: Keyboard shortcuts
+        mapEditorDialog.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                mapEditorDialog.close();
+            }
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                document.getElementById('save-and-close-map-btn').click();
+            }
+        });
+
+        document.getElementById('close-map-btn').onclick = () => mapEditorDialog.close();
+    }
+
+    if (!scriptsLoaded) {
+        const loadScript = (src) => new Promise((res, rej) => {
+            const s = document.createElement('script'); s.src = src; 
+            document.head.appendChild(s); s.onload = res; s.onerror = rej;
+        });
+        try {
+            await loadScript("https://unpkg.com/leaflet@latest/dist/leaflet.js");
+            await loadScript("https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js");
+            scriptsLoaded = true;
+        } catch (e) { return console.error("Load failed", e); }
+    }
+
+    mapEditorDialog.showModal();
+
+    if (!leafletEditorMap) {
+        leafletEditorMap = L.map(mapEditorDialog.querySelector('#map-container')).setView([52.011, 4.71], 16);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20 }).addTo(leafletEditorMap);
+        
+        leafletEditorMap.pm.addControls({
+            drawControls: true, editControls: true, 
+            drawCircle: false, drawRectangle: false, drawMarker: true, 
+            drawCircleMarker: false, drawText: false, rotateMode: false,
+            cutPolygon: true // This enables drawing holes in existing polygons
+        });
+
+        leafletEditorMap.on('pm:create', updateWKTFromMap);
+        leafletEditorMap.on('pm:remove', updateWKTFromMap);
+    } else {
+        leafletEditorMap.eachLayer(l => {
+            if (l instanceof L.Path || l instanceof L.Marker) leafletEditorMap.removeLayer(l);
+        });
+        leafletEditorMap.invalidateSize();
+    }
+
+    const wktInput = document.getElementById('asWKT');
+    wktInput.value = currentWKT || '';
+
+    if (wktInput.value !== "") {
+        try {
+            const primitive = Terraformer.WKT.parse(wktInput.value);
+            const area = L.geoJson(primitive);
+            area.addTo(leafletEditorMap);
+            leafletEditorMap.fitBounds(area.getBounds(), { maxZoom: 18 });
+            
+            // Re-bind events to loaded layers
+            area.eachLayer(l => l.on('pm:update pm:dragend pm:cut', updateWKTFromMap));
+        } catch (e) { console.error("WKT Error", e); }
+    }
+
+    document.getElementById('save-and-close-map-btn').onclick = () => {
+        elementWKT.value = wktInput.value;
+        mapEditorDialog.close();
+        // Trigger Omeka validation logic if it exists
+        $(elementWKT).trigger('change');
+    };
+
+    // Implementation of #1: Smart Multi-Type Refinement
+    function updateWKTFromMap() {
+        const layers = [];
+        leafletEditorMap.eachLayer(l => {
+            if ((l instanceof L.Path || l instanceof L.Marker) && !l._pmTempLayer && l.options.attribution !== '&copy; OpenStreetMap') {
+                layers.push(l);
+            }
+        });
+
+        if (layers.length === 0) {
+            wktInput.value = "";
+            return;
+        }
+
+        const featureCollection = L.featureGroup(layers).toGeoJSON(PRECISION);
+        const features = featureCollection.features;
+
+        let finalGeometry;
+
+        if (features.length === 1) {
+            // Standard single geometry (handles Polygon with holes automatically)
+            finalGeometry = features[0].geometry;
+        } else {
+            const types = new Set(features.map(f => f.geometry.type));
+            
+            if (types.size === 1) {
+                // All same type: Convert to Multi-type
+                const type = features[0].geometry.type;
+                const multiTypeMap = {
+                    'Point': 'MultiPoint',
+                    'LineString': 'MultiLineString',
+                    'Polygon': 'MultiPolygon'
+                };
+                
+                finalGeometry = {
+                    type: multiTypeMap[type] || 'GeometryCollection',
+                    coordinates: features.map(f => f.geometry.coordinates)
+                };
+                
+                // GeometryCollection fallback if type isn't in map
+                if (finalGeometry.type === 'GeometryCollection') {
+                    finalGeometry.geometries = features.map(f => f.geometry);
+                }
+            } else {
+                // Mixed bag: Use GeometryCollection
+                finalGeometry = {
+                    type: "GeometryCollection",
+                    geometries: features.map(f => f.geometry)
+                };
+				// TODO: find a better, Omeka S like alternative for alert
+				alert("A mixed bag of points, lines and/or polygons leads to a geometry collection which is not supported!");
+				return;
+            }
+        }
+
+        try {
+            wktInput.value = Terraformer.WKT.convert(finalGeometry);
+        } catch (err) {
+            console.error("WKT Conversion Error", err);
+        }
+    }
+}
