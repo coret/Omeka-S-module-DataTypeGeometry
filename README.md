@@ -23,6 +23,10 @@ bottom left corner as base and allows floats.
 It is used by the module [Annotate Cartography], that allows to point markers
 and to highlight images and maps. This module can be used independantly too.
 
+**Added functionality**: The inline geometry editor is invoked by pressing Alt-g in a geo:asWKT field. Point, lines and polygons can be added visually, the result is converted to a WKT string.
+
+![Screencast of geometry editor](asset/img/geometry-editor.gif)
+
 It can be used with the module [Mapping]: a batch edit is added to convert
 literal data into geographical coordinates and vice-versa, so you can store
 markers as a standard rdf data in a property.
